@@ -1,0 +1,380 @@
+---
+title: "NOAA Storm event analysis"
+author: "KHYS / kshu"
+date: "3 Apr 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+# Synopsis
+The U.S. National Climatic Data Center (NCDC), a weather data archive under the National Oceanic and Atmospheric Administration, maintains a database of severe weather events. It includes timing and estimates of location, fatalities, injuries, property and crop damage as well encodings for event type ("`EVTYPE`"") and prepared remarks. The overwhelming majority of the work supporting this "report" was to clean the myriad `EVTYPE` variable, numbering nearly 900 types, into the several dozen types at the [NCDC Storm Events database](https://www.ncdc.noaa.gov/stormevents/). Despite the clear imperfections resulting from this cleaning, the results inferred from the `ggplot2`-produced plots were not surprising: tornadoes, flooding, hurricanes/typhoons, and heat waves were among the most consequential events to public health and finances.
+
+# Processing
+
+First, the relevant libraries are loaded and then the `.csv.bz2` file downloaded and read into a `tibble`.
+```{r setup, include=FALSE}
+require(knitr)
+library(tidyverse)
+# library(plyr)
+library(reshape2)
+library(ggplot2)
+library(lubridate)
+opts_chunk$set(echo = TRUE)
+opts_knit$set(root.dir="C:/HY/Projects/NCDC_storm_analysis")
+```
+
+```{r loading, cache=TRUE, warning=FALSE, message=FALSE}
+urlData<-paste("https://d396qusza40orc.cloudfront.net/repdata%2Fdata",
+               "%2FStormData.csv.bz2",sep="")
+# download.file(urlData, "StormData.csv.bz2")
+## Calling unzip will produce an error
+stormData<-tbl_df(read.csv("StormData.csv.bz2"))
+```
+
+In order to answer the question on economic damages, the decoding of the variable `PROPDMGEXP` is necessary.
+```{r processing, warning=FALSE, message=FALSE}
+stormData<-stormData %>%
+  mutate(BGN_DATE=as.Date(BGN_DATE, "%m/%d/%Y"),
+         REMARKS=as.character(REMARKS)) %>%
+  rename(FujitaRating=F)
+levels(stormData$PROPDMGEXP)
+dashExp<-stormData %>% filter(PROPDMGEXP=="-")
+qExp<-stormData %>% filter(PROPDMGEXP=="?")
+plusExp<-stormData %>% filter(PROPDMGEXP=="+")
+digitExp<-stormData %>%
+  filter(PROPDMG != 0 & PROPDMGEXP %in% as.character(seq(0,8)))
+
+parkColoradoHail<-stormData %>%
+  filter(PROPDMG != 0 & PROPDMGEXP == as.character(0) &
+           BGN_DATE==as.Date("1994-08-04") &
+           STATE=="CO" & COUNTYNAME=="PARK" & EVTYPE=="HAIL")
+toMultiplier<-function(x) {
+  return(case_when(x %in% c("","-","?") ~ 0,
+                   x == "+" ~ 1,
+                   x %in% as.character(seq(0,8)) ~ 10,
+                   toupper(x) == "H" ~ 100,
+                   toupper(x) == "K" ~ 1E3,
+                   toupper(x) == "M" ~ 1E6,
+                   toupper(x) == "B" ~ 1E9,
+                   TRUE ~ as.numeric(NA)))
+}
+# stormData<-stormData %>% select(-(MultPropDmg:typeEvent))
+stormData<-stormData %>%
+  mutate(MultPropDmg=toMultiplier(PROPDMGEXP),
+         MultCropDmg=toMultiplier(CROPDMGEXP)) %>%
+  mutate(ActualPropDmg=MultPropDmg * PROPDMG,
+         ActualCropDmg=MultCropDmg * CROPDMG) %>%
+  mutate(TotalDmg=ActualPropDmg+ActualCropDmg)
+```
+As an example, a hail event in Park County, Colorado on `r parkColoradoHail$BGN_DATE` is listed with a `PROPDMG` of `r parkColoradoHail$PROPDMG` and `PROPDMGEXP` of `r parkColoradoHail$PROPDMGEXP`. Searching at the [NCDC Storm Events database](https://www.ncdc.noaa.gov/stormevents/) results in property damages of 0.04K. Thus, if `PROPDMGEXP = 0`, it is actually a multiplier of 10.
+
+Now comes the renaming of the `EVTYPE` variable; first, some analysis was performed on the `FujitaRating` variable to determine whether the simple existence of a Fujita rating is sufficient to label an event a Tornado.
+```{r Tornadoes I}
+stormData<-stormData %>%
+  # remove excess white space and convert all EVTYPE to uppercase
+  mutate(EVTYPE=toupper(trimws(as.character(EVTYPE)))) %>%
+  mutate(EVTYPE=gsub("/ ","", EVTYPE)) %>%
+  mutate(FujitaRating=ifelse(grepl("F[0-5]", EVTYPE),
+                             as.integer(str_extract(EVTYPE,"[0-5]")),
+                             FujitaRating))
+unique(unlist(stormData %>%
+                filter(!is.na(FujitaRating)) %>%
+                select(EVTYPE)))
+nonTornadicFujitas<-stormData %>%
+  filter(!is.na(FujitaRating) & EVTYPE %in% c("HEAVY RAIN","TSTM WIND"))
+table(nonTornadicFujitas$EVTYPE)
+
+wordTstm<-"THU|TSTM"
+tStmRegex<-paste("^(",
+                 wordTstm,
+                 "|(SEV(.)+(",
+                 wordTstm,
+                 "))|(GU(.)+(",
+                 wordTstm,
+                 ")))",
+                 sep=""
+)
+nominalTstm<-stormData %>% filter(grepl(tStmRegex,EVTYPE))
+
+stormData<-stormData %>% mutate(typeEvent=ifelse(!is.na(FujitaRating),
+                                                 "Tornado",
+                                                 as.character(NA)))
+```
+Examining the event types with a name other than "Tornado" or "Funnel cloud", there are only `r nrow(nonTornadicFujitas)` such entries in the data frame. As these comprise `r sum(nonTornadicFujitas$FATALITIES)+sum(nonTornadicFujitas$INJURIES)` fatalities and injuries, and `r sum(nonTornadicFujitas$TotalDmg)` in damage, accounting for `r sum(nonTornadicFujitas$TotalDmg)/sum(nominalTstm$TotalDmg) * 100`% of the nominal thunderstorm damage, I conclude that mere presence of a Fujita rating is sufficient to label an event tornadic. Note that `WATERSPOUT/TORNADO` was included as some (land) tornadoes _do_ begin their lives as waterspouts.
+
+Now the examination of the cases where `EVTYPE` has some form of "tornado" in the name. Again, `WATERSPOUT/TORNADO` and its variants will be treated as tornadic, not waterspouts.
+
+```{r Tornadoes II}
+nonFujitaTorn<-stormData %>%
+  filter(is.na(FujitaRating) & grepl("TORN", EVTYPE))
+unique(nonFujitaTorn$EVTYPE)
+centuryStorm<-stormData %>% filter(grepl("TORN(.)+TSTM", EVTYPE))
+csType<-unlist(centuryStorm$EVTYPE)
+```
+
+The "odd one out" `EVTYPE` here is `r csType`, and this `EVTYPE` happens to correspond with the 1993 Storm of the Century, which began in the state of `r unlist(strsplit(as.character(unlist(centuryStorm$END_LOCATI)), " "))[2]` on `r unlist(centuryStorm$BGN_DATE)`. The NCDC remarks for this event are as follows:
+```{r Tornadoes III-Storm of the Century narrative}
+print(unlist(centuryStorm$REMARKS))
+```
+Reading the remarks, the NCDC characterizes the event in Florida as beginning with a "severe squall line", which is by definition a line of thunderstorms. The narrative also notes multiple tornadoes and the rare (for Florida) winter storm surge, which are also valid event types. However, for the purpose of simplifying this analysis, the "cleaned" `EVTYPE`, stored in `typeEvent`, will be "Thunderstorm Wind". The `typeEvent` is now renamed accordingly:
+```{r tornado holdouts}
+idxCentury<-which(stormData$EVTYPE==csType)
+idxNonFujita<-setdiff(which(is.na(stormData$FujitaRating) &
+                              grepl("TORN", stormData$EVTYPE)),
+                      idxCentury)
+stormData$typeEvent[idxNonFujita]<-"Tornado"
+stormData$typeEvent[idxCentury]<-"Thunderstorm Wind"
+```
+
+Before proceeding to other values of `EVTYPE`, `r round(sum(!is.na(stormData$typeEvent)) / nrow(stormData),3)*100`% of the observations now have a cleaned `typeEvent` value. The code uses `case_when()`, similar to a `switch` and `case` clause series in Java.
+
+* Flash floods processed; the reader is invited to parse this Regex for themselves.
+* Non-flash floods (output of `typeEvent="Flood"`) occur when there is no flash element or any coastal flooding or beach erosion.
+* The choice to classify `EVTYPE` values containing `"COAST"`, `"BEACH"`, and/or `"EROSION"`, but not the word `"SURGE"` as being `typeEvent="Coastal Flood"` was somewhat arbitrary, as coastal flooding and beach erosion can clearly occur with Storm Surge.
+* For `typeEvent="Thunderstorm Wind"`, the regular expression `tStmRegex` was chosen so that event descriptions beginning with `SEVERE THUNDERSTORM`, `MARINE THUNDERSTORM`, `THUNDERSTORM`, or `TSTORM` would take precedent, regardless of the presence of other possible events afterwards, such as `EVTYPE="TSTM WIND/HAIL"`. This guideline will be observed henceforth unless otherwise stated.
+* Events containing `WATERSP` but not the `TORN` prefix are classified as `typeEvent=Waterspout`.
+```{r other event types I}
+tStmRegex
+stormData<-stormData %>%
+  mutate(typeEvent=ifelse(!is.na(typeEvent),
+                          typeEvent,
+                          case_when(
+                            grepl("(^FLASH)|(FLOOD(.){1}FLASH)",EVTYPE) |
+                              grepl("( FLASH FLOOD)$",EVTYPE) ~
+                              "Flash Flood",
+                            grepl("FLOOD|FLD",EVTYPE) &
+                              !grepl("(FLASH|COAST|BEACH|EROSION|THU)",
+                                     EVTYPE) ~
+                              "Flood",
+                            grepl("(COAST|BEACH|EROSION)",EVTYPE) &
+                              !grepl("SURGE",EVTYPE) ~
+                              "Coastal Flood",
+                            grepl("SURGE",EVTYPE) ~
+                              "Storm Surge/Tide",
+                            grepl(tStmRegex,EVTYPE) ~
+                              "Thunderstorm Wind",
+                            grepl(paste("^(MAR(.)+(",
+                                        wordTstm,
+                                        "))",
+                                        sep=""),EVTYPE) ~
+                              "Marine Thunderstorm Wind",
+                            grepl("HUR|TYP",EVTYPE) ~
+                              "Hurricane (Typhoon)",
+                            grepl("TROP",EVTYPE) ~
+                              "Tropical Storm or Depression",
+                            grepl("(?=.*\\bWATERSP)(?!.*TORN)",
+                                  EVTYPE,
+                                  perl=TRUE) ~
+                              "Waterspout",
+                            TRUE ~ as.character(NA)
+                          )
+  )
+  )
+```
+
+With `r length(unique(stormData$typeEvent))-1` event types classified, there are now `r round(sum(!is.na(stormData$typeEvent)) / nrow(stormData),3)*100`% of the observations with a cleaned `typeEvent` value.
+```{r other event types II}
+stormData<-stormData %>%
+  mutate(typeEvent=ifelse(!is.na(typeEvent),
+                          typeEvent,
+                          case_when(
+                            grepl("(^HAIL)|( HAIL$)",EVTYPE) &
+                              !grepl("MAR",EVTYPE) ~
+                              "Hail",
+                            grepl("^((GU|HI|STRO)(.)+WIND)",EVTYPE) ~
+                              "High or Strong Wind",
+                            grepl("^(MAR(.)+WIND)",EVTYPE)~
+                              "Marine High or Strong Wind",
+                            grepl("^AST(.)+LO",EVTYPE)~
+                              "Astronomical Low Tide",
+                            grepl("^AVA",EVTYPE)~
+                              "Avalanche",
+                            grepl("^BLI",EVTYPE)~
+                              "Blizzard",
+                            grepl("LAK(.)+SN",EVTYPE)~
+                              "Lake-Effect Snow",
+                            grepl("^HEA(.)+SN",EVTYPE) &
+                              !grepl("LAK",EVTYPE)~
+                              "Heavy Snow",
+                            grepl("FROST|FREEZE",EVTYPE) ~
+                              "Frost/Freeze",
+                            TRUE ~ as.character(NA)
+                          )
+  ))
+stormData<-stormData %>%
+  mutate(typeEvent=ifelse(!is.na(typeEvent),
+                          typeEvent,
+                          case_when(
+                            grepl("(^COLD)|( COLD$)|(WIND(.)?CHILL)",EVTYPE) &
+                              !grepl("AIR",EVTYPE)~
+                              "Extreme Cold/Wind Chill",
+                            grepl("(^([^/]*HEAT))|(REC(.)+HEAT)",EVTYPE)~
+                              "Excessive Heat",
+                            grepl("WIL",EVTYPE)~
+                              "Wildfire",
+                            grepl("^DROU",EVTYPE)~
+                              "Drought",
+                            grepl("(^DUST)|(DUST$)",EVTYPE)~
+                              "Dust Devil or Storm",
+                            grepl("^HEAVY RA",EVTYPE)~
+                              "Heavy Rain",
+                            grepl("^LIGHTN",EVTYPE)~
+                              "Lightning",
+                            grepl("VOL",EVTYPE)~
+                              "Volcanic Ash",
+                            grepl("WIL",EVTYPE)~
+                              "Volcanic Ash",
+                            grepl("WINT(.)+(MIX|WEA)",EVTYPE)~
+                              "Other Wintry Weather",
+                            grepl("^WINT(.)+ST",EVTYPE)~
+                              "Winter Storm",
+                            grepl("FUN",EVTYPE)~
+                              "Funnel Cloud",
+                            grepl("TSU",EVTYPE)~
+                              "Tsunami",
+                            grepl("RIP|SURF",EVTYPE)~
+                              "Rip Current",
+                            TRUE ~ as.character(NA)
+                          )
+  ))
+stormData<-stormData %>%
+  mutate(typeEvent=ifelse(!is.na(typeEvent),
+                          typeEvent,
+                          case_when(grepl("(FR(.)+RAIN)|SLE|(ICE ST)",
+                                          EVTYPE)~
+                                      "Ice Storm or Sleet",
+                                    grepl("FR(.)+ING",EVTYPE) &
+                                      !grepl("(RAIN)|(FOG)",EVTYPE)~
+                                      "Other Wintry Weather",
+                                    grepl("FOG",EVTYPE)~
+                                      "Dense Fog",
+                                    grepl("SMO",EVTYPE)~
+                                      "Dense Smoke",
+                                    TRUE ~ as.character(NA)
+                          )))
+```
+
+With most (but not all) of the event types processed (`r length(unique(stormData$typeEvent))-1` of them), accounting for `r round(sum(!is.na(stormData$typeEvent)) / nrow(stormData),3)*100`% of the observations, it is time to examine the entries with an empty `typeEvent`. One possible cutoff is entries with damage attaining 1 million dollars:
+```{r missing}
+missingMil<-stormData %>%
+  filter(is.na(typeEvent) & TotalDmg>=1E6) %>%
+  arrange(desc(TotalDmg))
+table(missingMil$EVTYPE)
+```
+Clearly, landslides account for the great majority of the unprocessed million-dollar events. Since they can be caused by a multitude of factors beyond weather, including earthquakes, volcanic eruptions, or even deliberate activity, they should be excluded. It remains to be demonstrated the approximate proportion of damages and casualties that is "missing" with the incomplete classification:
+```{r missing proportions}
+trimmedStorm<-stormData %>% filter(EVTYPE != "LANDSLIDE")
+dmgMissing<-unlist(trimmedStorm %>%
+                     filter(is.na(typeEvent)) %>%
+                     summarise(Dmg=sum(TotalDmg)))
+dmgNonMissing<-unlist(trimmedStorm %>%
+                        filter(!is.na(typeEvent)) %>%
+                        summarise(Dmg=sum(TotalDmg)))
+injMissing<-unlist(trimmedStorm %>%
+                     filter(is.na(typeEvent)) %>%
+                     summarise(Dmg=sum(INJURIES)))
+injNonMissing<-unlist(trimmedStorm %>%
+                        filter(!is.na(typeEvent)) %>%
+                        summarise(Dmg=sum(INJURIES)))
+fatMissing<-unlist(trimmedStorm %>%
+                     filter(is.na(typeEvent)) %>%
+                     summarise(Dmg=sum(FATALITIES)))
+fatNonMissing<-unlist(trimmedStorm %>%
+                        filter(!is.na(typeEvent)) %>%
+                        summarise(Dmg=sum(FATALITIES)))
+```
+After removing landslide events, `r round(dmgMissing/(dmgMissing+dmgNonMissing)*100,2)`%, `r round(fatMissing/(fatMissing+fatNonMissing)*100,2)`%, and `r round(injMissing/(injMissing+injNonMissing)*100,2)`% of the total damage (property and crop summed), fatalities, and injuries, respectively, have an unlabelled event type.
+
+# Results
+```{r results I}
+trimmedStorm<-trimmedStorm %>%
+  mutate(typeEvent=as.factor(ifelse(is.na(typeEvent),
+                                    "UNCLASSIFIED",
+                                    typeEvent)))
+aggregates<-trimmedStorm %>%
+  group_by(typeEvent) %>%
+  dplyr::summarise(TotalFatalities=sum(FATALITIES),
+                   TotalInjuries=sum(INJURIES),
+                   TotalDamage=sum(TotalDmg) / 1E9)
+names(aggregates)[ncol(aggregates)]<-"Total Damage (B$US)"
+
+meltAgg<-melt(aggregates, id.vars="typeEvent")
+meltAgg<-meltAgg %>%
+  arrange(variable, desc(value)) %>%
+  mutate(order=row_number())
+worstEventsAgg<-meltAgg %>%
+  group_by(variable) %>%
+  dplyr::summarise(worstEvent=first(typeEvent),
+                   order=first(order),
+                   val=first(value))
+barLabels<-worstEventsAgg
+
+ggplot(data=meltAgg, aes(order, value)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~variable, scales="free") +
+  geom_text(data=barLabels,
+            mapping=aes(x=order+10, y=val, label=worstEvent)) +
+  labs(x="Within-variable ranking",
+       title="Total casualties or damages from NCDC storms, 1950 to 2011")
+```
+
+Using `ggplot2`, and computing a summed aggregate over the entirety of 1950--2011, the worst event type by both total Fatalities and total Injuries was "`r as.character(worstEventsAgg$worstEvent[1])`", with `r as.integer(worstEventsAgg$val[1])` deaths and `r as.integer(worstEventsAgg$val[2])` injuries. The worst event type by Total Damages (property and crop) was "`r as.character(worstEventsAgg$worstEvent[3])`", incurring a total of \$`r round(worstEventsAgg$val[3],2)` billion.
+
+The next graph will be a time series of total statistics by year. However, there are `r length(levels(trimmedStorm$typeEvent))` classified event types, with many of them, such as "Astronomical Low Tide" being insignificant to health and/or damages in most years. Thus, to reduce clutter, an appropriate number of event types will be examined.
+```{r results II}
+cumulatives<-apply(aggregates %>% select(-typeEvent),
+                   MARGIN=2,
+                   function(x) cumsum(rev(sort(x))) / sum(x))
+cumulatives<-as.data.frame(cumulatives)
+idx80<-apply(cumulatives, MARGIN=2, function(x) min(which(x >= 0.80)))
+numTypes<-max(idx80)
+apply(cumulatives, MARGIN=2, function(x) x[numTypes])
+```
+
+Thus `numTypes` rows account for the above proportion of each variable.
+```{r results III}
+aggregates<-as.data.frame(aggregates)
+topTypes<-sapply(seq(2,ncol(aggregates)),
+                 function(k) aggregates$typeEvent[
+                   rev(order(aggregates[,k]))[seq(numTypes)]
+                   ])
+topTypes<-data.frame(topTypes)
+names(topTypes)<-names(cumulatives)
+tsStormTopOnly<-trimmedStorm %>%
+  filter(typeEvent %in% unique(unlist(topTypes))) %>%
+  mutate(yr=year(BGN_DATE)) %>%
+  group_by(yr, typeEvent) %>%
+  dplyr::summarise(AnnualFatalities=log10(1+sum(FATALITIES)),
+                   AnnualInjuries=log10(1+sum(INJURIES)),
+                   AnnualDamage=log10(1+sum(TotalDmg)))
+meltedTS<-melt(tsStormTopOnly, id.vars=c("yr","typeEvent"))
+
+ggplot(data=meltedTS, aes(x=yr, y=value,
+                          color=typeEvent,
+                          group=typeEvent)) +
+  geom_line(size=0.75, alpha=0.75) +
+  facet_grid(variable~., scales="free") +
+  labs(x="Year", y="Log10-value",
+       title="Time series of Casualties and Damage")
+```
+
+Aggregating the three variables by year of the commencement of each event (since end dates are not always available), and choosing the `r length(unlist(topTypes))` variables deemed to constitute at least 80% of fatalities, injuries, and damage across all of 1950--2011, the faceted line graph is produced above. Upon inspection, the most consistently high event types for each metric are:
+
+1. Fatalities
+  + Excessive Heat
+  + Flash Flooding
+  + Flooding (non-flash, non-coastal)
+  + Lightning
+  + Rip Currents
+  + Thunderstorm Winds
+  + Tornadoes
+2. Injuries
+  + The same list as for Fatalities with the addition of Hail
+3. Damage (Property and Crop)
+  + Flash Flooding
+  + Flooding (non-flash, non-coastal)
+  + Hurricanes/Typhoons, with the notable exception of 2010
+  + Lightning
+  + Rip Currents
+  + Thunderstorm Winds
+  + Tornadoes

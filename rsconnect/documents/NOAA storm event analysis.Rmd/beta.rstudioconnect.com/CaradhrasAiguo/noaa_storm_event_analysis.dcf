@@ -1,0 +1,12 @@
+name: noaa_storm_event_analysis
+title: NOAA storm event analysis
+username: CaradhrasAiguo
+account: CaradhrasAiguo
+server: beta.rstudioconnect.com
+hostUrl: https://beta.rstudioconnect.com/__api__
+appId: 3436
+bundleId: 7362
+url: https://beta.rstudioconnect.com/content/3436/
+when: 1522998584.0396
+asMultiple: FALSE
+asStatic: FALSE

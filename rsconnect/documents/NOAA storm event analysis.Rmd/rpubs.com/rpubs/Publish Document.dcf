@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/377330/28a12c3112d9452fbbe56062bcca0d89
+bundleId: https://api.rpubs.com/api/v1/document/377330/28a12c3112d9452fbbe56062bcca0d89
+url: http://rpubs.com/CaradhrasAiguo/377330
+when: 1523317530.02275
